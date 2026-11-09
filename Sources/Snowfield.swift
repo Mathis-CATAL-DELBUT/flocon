@@ -661,6 +661,14 @@ final class Snowfield {
 
     private func ballIndex(_ id: Int) -> Int? { snowballs.firstIndex { $0.id == id } }
 
+    /// Le point p est-il sur un bonhomme visible (avec une petite marge) ?
+    private func snowmanIndex(at p: SIMD2<Float>) -> Int? {
+        snowmen.firstIndex { m in
+            let g = m.geo()
+            return !m.hidden && abs(p.x - m.x) < g.r1 * 1.15 && p.y < m.baseY + 4 && p.y > m.baseY + g.c3 - g.r3 - 6
+        }
+    }
+
     /// Surface enneigée (non cachée) juste sous le point p, à `slack` pt près.
     private func surfacePile(near p: SIMD2<Float>, slack: Float) -> WinPile? {
         for wp in order where !wp.noSnow {
@@ -690,8 +698,9 @@ final class Snowfield {
             grabbedID = snowballs[i].id
             return
         }
-        // Commencer une boule en glissant le long de la neige
-        guard abs(cursorV.x) > 25, let wp = surfacePile(near: cursor, slack: 12),
+        // Commencer une boule en glissant le long de la neige (pas sur un bonhomme :
+        // là, ⌥ + un coup de curseur sert à le faire tomber)
+        guard abs(cursorV.x) > 25, snowmanIndex(at: cursor) == nil, let wp = surfacePile(near: cursor, slack: 12),
               let c = wp.bin(cursor.x), wp.pile.h[c] > 1.5 else { return }
         var area: Float = 0
         for i in max(0, c - 3)...min(wp.pile.count - 1, c + 3) {
@@ -1091,10 +1100,16 @@ final class Snowfield {
             let target = wp.surface(m.x) ?? wp.minY
             if abs(target - m.baseY) > 3 { m.baseY = target } else { m.baseY += (target - m.baseY) * min(1, dt * 2) }
             m.hidden = wp.bin(m.x).map { wp.occluded[$0] } ?? false
-            // ⌥ + un coup de curseur rapide à travers le bonhomme : il tombe.
-            if option && grabbedID == nil && cursorOn && !m.hidden && abs(cursorV.x) > 260 {
+            // ⌥ + un coup de curseur rapide à travers le bonhomme, ou une boule qu'on fait
+            // rouler contre lui : il tombe.
+            if option && cursorOn && !m.hidden && abs(cursorV.x) > 180 {
                 let gg = m.geo()
-                if abs(cursor.x - m.x) < gg.r1 && cursor.y < m.baseY && cursor.y > m.baseY + gg.c3 - gg.r3 {
+                var hit = abs(cursor.x - m.x) < gg.r1 * 1.15 && cursor.y < m.baseY + 4 && cursor.y > m.baseY + gg.c3 - gg.r3 - 6
+                if !hit, let id = grabbedID, let bi = ballIndex(id) {
+                    let b = snowballs[bi]
+                    hit = abs(b.x - m.x) < b.r + gg.r1 * 0.9 && abs(b.y - (m.baseY + gg.c1)) < b.r + gg.r1
+                }
+                if hit {
                     collapseSnowman(i, vx: cursorV.x * 0.25)
                     i -= 1
                     continue
