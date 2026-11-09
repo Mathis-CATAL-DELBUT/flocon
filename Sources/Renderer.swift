@@ -119,7 +119,7 @@ final class Renderer {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: count)
         }
 
-        // Ordre : neige des fenêtres, bonshommes, neige au sol (cache leur base), flocons devant.
+        // Ordre : neige, bonshommes et boules posés dessus, puis tractopelle et flocons devant.
         drawPiles(0, f.pileSplit)
         drawSprites(0, f.spriteSplit)
         drawPiles(f.pileSplit, f.pileVerts.count - f.pileSplit)

@@ -128,7 +128,7 @@ struct Snowman {
     struct Geo { let r1, r2, r3, c1, c2, c3: Float }
     func geo(_ p1: Float = 1, _ p2: Float = 1, _ p3: Float = 1) -> Geo {
         let a = r1 * p1, b = r2 * p2, c = r3 * p3
-        let c1 = -a * 0.8
+        let c1 = -a * 0.94          // à peine enfoncé dans la neige
         let c2 = c1 - a * 0.82 - b * 0.72
         let c3 = c2 - b * 0.78 - c * 0.8
         return Geo(r1: a, r2: b, r3: c, c1: c1, c2: c2, c3: c3)
@@ -138,6 +138,8 @@ struct Snowman {
 /// Boule de neige roulée par l'utilisateur (⌥ + curseur sur la neige), empilable.
 struct Snowball {
     enum State { case rolling, carried, falling, resting }
+    /// Distance centre → surface de la neige, en rayons (la boule s'enfonce à peine).
+    static let sink: Float = 0.96
     let id: Int
     var x: Float, y: Float        // centre
     var r: Float
@@ -208,8 +210,8 @@ final class Snowfield {
     // Géométrie de la frame (lue par le Renderer)
     private(set) var sprites: [Sprite] = []
     private(set) var pileVerts: [PileVert] = []
-    private(set) var spriteSplit = 0   // [0, split) = bonshommes et boules (sous la neige), puis le reste
-    private(set) var pileSplit = 0
+    private(set) var spriteSplit = 0   // [0, split) = bonshommes et boules (devant la neige), puis le reste
+    private(set) var pileSplit = 0     // toute la neige, dessinée avant les bonshommes
 
     init(screen: NSScreen, seed: UInt64) {
         rng = RNG(seed: seed)
@@ -713,7 +715,7 @@ final class Snowfield {
         if snowballs.count >= 12, let old = snowballs.firstIndex(where: { $0.state == .resting && $0.restOn == nil }) {
             snowballs.remove(at: old)
         }
-        let b = Snowball(id: nextBallID, x: cursor.x, y: (wp.surface(cursor.x) ?? wp.minY) - r * 0.9, r: r,
+        let b = Snowball(id: nextBallID, x: cursor.x, y: (wp.surface(cursor.x) ?? wp.minY) - r * Snowball.sink, r: r,
                          state: .rolling, support: wp.id, relX: cursor.x - wp.minX)
         nextBallID += 1
         snowballs.append(b)
@@ -762,7 +764,7 @@ final class Snowfield {
                 }
                 b.spin += (nx - b.x) / max(b.r, 1)
                 b.x = nx
-                let target = (wp.surface(b.x) ?? wp.minY) - b.r * 0.9
+                let target = (wp.surface(b.x) ?? wp.minY) - b.r * Snowball.sink
                 b.y += (target - b.y) * min(1, 18 * dt)
                 b.relX = b.x - wp.minX
             } else {
@@ -780,7 +782,7 @@ final class Snowfield {
             var b = snowballs[i]
             switch b.state {
             case .falling:
-                let prevBottom = b.y + b.r * 0.9
+                let prevBottom = b.y + b.r * Snowball.sink
                 b.vy += 900 * dt
                 b.y += b.vy * dt
                 // Atterrit sur une boule au repos assez grosse ?
@@ -812,8 +814,8 @@ final class Snowfield {
                     for wp in order where !wp.noSnow {
                         guard let li = wp.bin(b.x), !wp.occluded[li] else { continue }
                         let s = wp.minY + wp.base[li] - wp.pile.h[li]
-                        if prevBottom <= s + 1 && b.y + b.r * 0.9 >= s {
-                            b.y = s - b.r * 0.9
+                        if prevBottom <= s + 1 && b.y + b.r * Snowball.sink >= s {
+                            b.y = s - b.r * Snowball.sink
                             b.state = .resting
                             b.support = wp.id
                             b.relX = b.x - wp.minX
@@ -838,7 +840,7 @@ final class Snowfield {
                 } else if let sid = b.support, let wp = pileFor(sid), wp.visible, !wp.noSnow,
                           b.relX >= 0, b.relX <= wp.w {
                     b.x = wp.minX + b.relX
-                    let target = (wp.surface(b.x) ?? wp.minY) - b.r * 0.9
+                    let target = (wp.surface(b.x) ?? wp.minY) - b.r * Snowball.sink
                     if abs(target - b.y) > 3 { b.y = target } else { b.y += (target - b.y) * min(1, 3 * dt) }
                 } else {
                     b.state = .falling; b.support = nil
@@ -860,7 +862,7 @@ final class Snowfield {
                 guard let sid = base.support,
                       let mid = snowballs.first(where: { $0.restOn == base.id }),
                       let head = snowballs.first(where: { $0.restOn == mid.id }) else { continue }
-                var m = Snowman(x: base.x, baseY: base.y + base.r * 0.9, r1: base.r, r2: mid.r, r3: head.r,
+                var m = Snowman(x: base.x, baseY: base.y + base.r * 0.94, r1: base.r, r2: mid.r, r3: head.r,
                                 auto: false, support: sid, relX: base.relX)
                 m.t = 2.4   // le corps est déjà là : on passe directement au visage
                 if snowmen.count >= 4 { snowmen.removeFirst() }
@@ -1146,17 +1148,17 @@ final class Snowfield {
         sprites.removeAll(keepingCapacity: true)
         pileVerts.removeAll(keepingCapacity: true)
 
-        // 1. Bonshommes et boules (la neige dessinée ensuite cache leur base)
-        pileSplit = 0
+        // 1. Neige des fenêtres et du Dock
+        for wp in order.reversed() where !wp.noSnow {
+            appendPile(wp.pile, x0: wp.minX, baseY: wp.minY, base: wp.base, occluded: wp.occluded)
+        }
+        pileSplit = pileVerts.count
+
+        // 2. Bonshommes et boules, posés sur la neige (devant elle)
         let white = SIMD4<Float>(1, 1, 1, 1)
         for m in snowmen where !m.hidden { appendSnowman(m) }
         for b in snowballs where !b.hidden { sprites.append(mkSprite(b.x, b.y, b.r, b.spin, white, .ball, textured: true)) }
         spriteSplit = sprites.count
-
-        // 2. Neige des fenêtres et du Dock
-        for wp in order.reversed() where !wp.noSnow {
-            appendPile(wp.pile, x0: wp.minX, baseY: wp.minY, base: wp.base, occluded: wp.occluded)
-        }
 
         // 3. Tractopelle, puis flocons devant
         if let p = plow { appendPlow(p) }
