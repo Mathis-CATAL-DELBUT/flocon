@@ -140,9 +140,12 @@ struct Snowball {
     enum State { case rolling, carried, falling, resting }
     /// Distance centre → surface de la neige, en rayons (la boule s'enfonce à peine).
     static let sink: Float = 0.96
+    /// Au-delà de cette vitesse d'impact (≈ 200 pt de chute), la boule éclate.
+    static let breakSpeed: Float = 620
     let id: Int
     var x: Float, y: Float        // centre
     var r: Float
+    var vx: Float = 0             // élan horizontal (lancer, roulement)
     var vy: Float = 0
     var spin: Float = 0
     var state: State
@@ -725,14 +728,40 @@ final class Snowfield {
     private func release(_ id: Int) {
         grabbedID = nil
         guard let i = ballIndex(id) else { return }
+        // Elle garde l'élan du curseur : lancée en l'air, ou qui continue de rouler.
+        snowballs[i].vx = max(-1100, min(1100, snowballs[i].vx))
         if snowballs[i].state == .rolling, let sid = snowballs[i].support, let wp = pileFor(sid) {
             snowballs[i].state = .resting
             snowballs[i].relX = snowballs[i].x - wp.minX
+            snowballs[i].vy = 0
         } else {
             snowballs[i].state = .falling
             snowballs[i].support = nil
+            snowballs[i].vy = max(-600, min(900, snowballs[i].vy))
         }
-        snowballs[i].vy = 0
+    }
+
+    /// La boule éclate : une partie redevient de la neige sur la surface, le reste en paquets.
+    private func breakBall(_ b: Snowball, on wp: WinPile?, surface: Float) {
+        let units = Float.pi * b.r * b.r / Pile.binW          // en « hauteur × colonnes »
+        if let wp {
+            let n = max(3, Int(b.r / 2))
+            for k in 0..<n {
+                let x = b.x + (Float(k) / Float(n - 1) - 0.5) * 1.8 * b.r + b.vx * 0.03
+                if x >= wp.minX && x < wp.maxX { wp.pile.add(at: x - wp.minX, mass: units * 0.55 / Float(n)) }
+            }
+            wp.pile.awake = 90
+        }
+        let count = min(14, Int(b.r / 2) + 4)
+        for _ in 0..<count where flakes.count < 3800 {
+            spawnClump(x: b.x + rng.r(-b.r, b.r) * 0.5, y: surface - rng.r(1, b.r * 0.6),
+                       vx: b.vx * 0.35 + rng.r(-130, 130), vy: -rng.r(60, 260),
+                       mass: units * 0.45 / Float(count), immune: 0.12)
+        }
+        for _ in 0..<10 where flakes.count < 3800 {
+            spawnPowder(x: b.x + rng.r(-b.r, b.r), y: surface - rng.r(0, b.r),
+                        vx: b.vx * 0.2 + rng.r(-90, 90), vy: -rng.r(40, 160))
+        }
     }
 
     private func updateSnowballs(dt: Float) {
@@ -741,6 +770,7 @@ final class Snowfield {
         // Boule tenue : elle roule sur la neige sous le curseur, sinon on la porte.
         if let id = grabbedID, let i = ballIndex(id) {
             var b = snowballs[i]
+            let ox = b.x, oy = b.y
             let overBall = snowballs.contains { $0.id != id && $0.state == .resting && abs($0.x - cursor.x) < $0.r }
             let wp = overBall ? nil : surfacePile(near: cursor, slack: b.r * 1.4)
             if let wp {
@@ -773,6 +803,9 @@ final class Snowfield {
                 b.x += (cursor.x - b.x) * min(1, 32 * dt)
                 b.y += (cursor.y - b.y) * min(1, 32 * dt)
             }
+            // Vitesse de la boule (lissée) : c'est l'élan qu'elle garde quand on la lâche.
+            b.vx = b.vx * 0.5 + (b.x - ox) / max(dt, 0.001) * 0.5
+            b.vy = b.state == .carried ? b.vy * 0.5 + (b.y - oy) / max(dt, 0.001) * 0.5 : 0
             snowballs[i] = b
         }
 
@@ -784,6 +817,8 @@ final class Snowfield {
             case .falling:
                 let prevBottom = b.y + b.r * Snowball.sink
                 b.vy += 900 * dt
+                b.vx -= b.vx * min(1, 0.3 * dt)
+                b.x += b.vx * dt
                 b.y += b.vy * dt
                 // Atterrit sur une boule au repos assez grosse ?
                 for j in snowballs.indices where j != i && snowballs[j].state == .resting {
@@ -791,17 +826,23 @@ final class Snowfield {
                     let topOfO = o.y - o.r * 0.8
                     if abs(b.x - o.x) < o.r * 0.9 + b.r * 0.6 && b.y + b.r >= topOfO && b.y < o.y && b.r <= o.r * 1.1
                         && !snowballs.contains(where: { $0.restOn == o.id }) {
+                        if b.vy > Snowball.breakSpeed {      // trop vite : elle éclate sur l'autre boule
+                            breakBall(b, on: o.support.flatMap { pileFor($0) }, surface: topOfO)
+                            b.dead = true
+                            break
+                        }
                         b.state = .resting
                         b.restOn = o.id
                         b.support = o.support
                         b.x = o.x
                         b.y = o.y - o.r * 0.82 - b.r * 0.72
                         b.vy = 0
+                        b.vx = 0
                         stacked = true
                         break
                     }
                 }
-                if b.state == .falling {
+                if b.state == .falling && !b.dead {
                     // Contre le flanc d'une autre boule : elle glisse à côté au lieu de s'y enfoncer.
                     for j in snowballs.indices where j != i && snowballs[j].state == .resting {
                         let o = snowballs[j]
@@ -815,16 +856,23 @@ final class Snowfield {
                         guard let li = wp.bin(b.x), !wp.occluded[li] else { continue }
                         let s = wp.minY + wp.base[li] - wp.pile.h[li]
                         if prevBottom <= s + 1 && b.y + b.r * Snowball.sink >= s {
+                            if b.vy > Snowball.breakSpeed {   // tombée de haut : elle éclate
+                                breakBall(b, on: wp, surface: s)
+                                b.dead = true
+                                break
+                            }
+                            // Pas assez haut : elle se pose et garde un peu de son élan.
                             b.y = s - b.r * Snowball.sink
                             b.state = .resting
                             b.support = wp.id
                             b.relX = b.x - wp.minX
                             b.vy = 0
+                            b.vx = b.vx * 0.7 + (b.vx >= 0 ? 1 : -1) * min(abs(b.vx) * 0.1, 40)
                             break
                         }
                     }
                 }
-                if b.y - b.r > H + 20 { b.dead = true }
+                if b.y - b.r > H + 20 || b.x < -b.r - 60 || b.x > W + b.r + 60 { b.dead = true }
             case .resting:
                 if let below = b.restOn {
                     if let j = ballIndex(below) {
@@ -839,9 +887,39 @@ final class Snowfield {
                     _ = wp                   // support caché : la boule attend, invisible
                 } else if let sid = b.support, let wp = pileFor(sid), wp.visible, !wp.noSnow,
                           b.relX >= 0, b.relX <= wp.w {
-                    b.x = wp.minX + b.relX
-                    let target = (wp.surface(b.x) ?? wp.minY) - b.r * Snowball.sink
-                    if abs(target - b.y) > 3 { b.y = target } else { b.y += (target - b.y) * min(1, 3 * dt) }
+                    if abs(b.vx) > 4 {
+                        // Elle roule encore : ralentit, tourne, ramasse un peu de neige.
+                        let ox = wp.minX + b.relX
+                        let nx = ox + b.vx * dt
+                        let maxR = max(4, min(30, (wp.surface(ox) ?? wp.minY) / 1.95))
+                        if b.r < maxR, let a = wp.bin(min(ox, nx)), let z = wp.bin(max(ox, nx)) {
+                            var area = Float.pi * b.r * b.r
+                            for k in a...z {
+                                let take = wp.pile.h[k] * 0.35
+                                wp.pile.h[k] -= take
+                                area += take * Pile.binW
+                            }
+                            wp.pile.awake = 90
+                            b.r = min(maxR, (area / Float.pi).squareRoot())
+                        }
+                        b.spin += (nx - ox) / max(b.r, 1)
+                        b.relX += nx - ox
+                        b.vx -= b.vx * min(1, 2.6 * dt) + (b.vx > 0 ? 1 : -1) * min(abs(b.vx), 70 * dt)
+                        // Elle bute contre une autre boule posée là
+                        if snowballs.contains(where: { $0.id != b.id && $0.support == sid && $0.restOn == nil
+                            && $0.state == .resting && abs($0.x - nx) < ($0.r + b.r) * 0.9 && ($0.x - nx) * b.vx > 0 }) {
+                            b.vx = 0
+                        }
+                    } else {
+                        b.vx = 0
+                    }
+                    if b.relX < 0 || b.relX > wp.w {
+                        b.state = .falling; b.support = nil      // roule au-delà du bord : elle tombe
+                    } else {
+                        b.x = wp.minX + b.relX
+                        let target = (wp.surface(b.x) ?? wp.minY) - b.r * Snowball.sink
+                        if abs(target - b.y) > 3 { b.y = target } else { b.y += (target - b.y) * min(1, 3 * dt) }
+                    }
                 } else {
                     b.state = .falling; b.support = nil
                 }
@@ -1386,7 +1464,7 @@ final class Snowfield {
     struct Debug { let balls: [(r: Float, state: String, support: String)]; let snowmen: Int; let dockSnow: Float
                    let winSnow: [CGWindowID: Float]; let clumps: Int; let plowing: Bool }
     var debug: Debug {
-        Debug(balls: snowballs.map { ($0.r, "\($0.state)@\(Int($0.x)),\(Int($0.y)) grab=\($0.id == grabbedID)", $0.support.map { "\($0)" } ?? "-") },
+        Debug(balls: snowballs.map { ($0.r, "\($0.state)@x\(Int($0.x))", $0.support.map { "\($0)" } ?? "-") },
               snowmen: snowmen.count, dockSnow: dock?.pile.total ?? -1,
               winSnow: piles.mapValues { $0.pile.total }, clumps: flakes.filter { $0.kind == 2 }.count,
               plowing: plow != nil)
