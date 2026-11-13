@@ -196,6 +196,15 @@ final class Snowfield {
     private var plow: Plow?
 
     private(set) var coveredByFullscreen = false
+
+    // Plusieurs écrans : une boule lancée (ou portée) vers un autre écran passe sur sa simulation.
+    /// Cet écran, en Quartz global (origine en haut à gauche de l'écran principal).
+    var globalFrame: CGRect { CGRect(x: origin.x, y: origin.y, width: CGFloat(W), height: CGFloat(H)) }
+    /// Les autres écrans, en Quartz global.
+    var neighbors: [CGRect] = []
+    /// Boules qui partent vers un autre écran, en coordonnées Quartz globales.
+    private var outgoing: [(ball: Snowball, grabbed: Bool)] = []
+    private var mouseQ = CGPoint(x: -99999, y: -99999)
     var isPlowing: Bool { plow != nil }
 
     private var rng: RNG
@@ -687,7 +696,15 @@ final class Snowfield {
 
     private func updateGrab() {
         guard option && cursorValid else {
-            if let id = grabbedID { release(id) }
+            if let id = grabbedID {
+                // Curseur parti sur un autre écran, ⌥ toujours enfoncée : la boule le suit.
+                if option, let i = ballIndex(id), handOffIfLeaving(snowballs[i], grabbed: true) {
+                    snowballs.remove(at: i)
+                    grabbedID = nil
+                } else {
+                    release(id)
+                }
+            }
             return
         }
         guard grabbedID == nil else { return }
@@ -700,6 +717,29 @@ final class Snowfield {
             snowballs[i].state = .carried
             snowballs[i].restOn = nil
             snowballs[i].support = nil
+            grabbedID = snowballs[i].id
+            return
+        }
+        // Rattraper une boule en l'air : le curseur doit être sur elle, ou sur le bout
+        // de trajectoire qu'elle vient de parcourir (une boule lancée va vite).
+        if let i = snowballs.indices.reversed().first(where: { k in
+            let b = snowballs[k]
+            guard b.state == .falling && !b.hidden && !b.dead else { return false }
+            let p = SIMD2(b.x, b.y), q = p - SIMD2(b.vx, b.vy) / 30
+            let d = q - p, len2 = simd_length_squared(d)
+            let t = len2 > 0.01 ? max(0, min(1, simd_dot(cursor - p, d) / len2)) : 0
+            return simd_distance(cursor, p + d * t) < b.r + 16
+        }) {
+            snowballs[i].state = .carried
+            snowballs[i].restOn = nil
+            snowballs[i].support = nil
+            // Elle s'arrête dans la main : on repart de la vitesse du curseur.
+            snowballs[i].vx = cursorV.x
+            snowballs[i].vy = cursorV.y
+            for _ in 0..<5 where flakes.count < 3800 {
+                spawnPowder(x: snowballs[i].x + rng.r(-snowballs[i].r, snowballs[i].r), y: snowballs[i].y,
+                            vx: rng.r(-60, 60), vy: -rng.r(20, 90))
+            }
             grabbedID = snowballs[i].id
             return
         }
@@ -872,6 +912,7 @@ final class Snowfield {
                         }
                     }
                 }
+                if !b.dead && handOffIfLeaving(b, grabbed: false) { b.dead = true }
                 if b.y - b.r > H + 20 || b.x < -b.r - 60 || b.x > W + b.r + 60 { b.dead = true }
             case .resting:
                 if let below = b.restOn {
@@ -1061,7 +1102,41 @@ final class Snowfield {
         buildGeometry()
     }
 
+    func takeOutgoing() -> [(ball: Snowball, grabbed: Bool)] {
+        defer { outgoing.removeAll(keepingCapacity: true) }
+        return outgoing
+    }
+
+    /// Reçoit une boule venue d'un autre écran (position et vitesse en Quartz global).
+    func receive(_ ball: Snowball, grabbed: Bool) {
+        var b = Snowball(id: nextBallID, x: ball.x - Float(origin.x), y: ball.y - Float(origin.y), r: ball.r,
+                         vx: ball.vx, vy: ball.vy, spin: ball.spin, state: .falling)
+        nextBallID += 1
+        if grabbed && grabbedID == nil {
+            b.state = .carried
+            grabbedID = b.id
+        }
+        if snowballs.count >= 12, let old = snowballs.firstIndex(where: { $0.state == .resting && $0.restOn == nil }) {
+            snowballs.remove(at: old)
+        }
+        snowballs.append(b)
+    }
+
+    private func onNeighbor(_ p: CGPoint) -> Bool { neighbors.contains { $0.contains(p) } }
+
+    /// Envoie la boule à l'écran voisin si son centre y est passé.
+    private func handOffIfLeaving(_ b: Snowball, grabbed: Bool) -> Bool {
+        let p = CGPoint(x: origin.x + CGFloat(b.x), y: origin.y + CGFloat(b.y))
+        let outside = b.x < 0 || b.x > W || b.y < 0 || b.y > H
+        guard outside || grabbed, onNeighbor(grabbed ? mouseQ : p) else { return false }
+        var g = b
+        g.x = Float(p.x); g.y = Float(p.y)
+        outgoing.append((g, grabbed))
+        return true
+    }
+
     private func updateCursor(_ m: NSPoint, dt: Float) {
+        mouseQ = CGPoint(x: m.x, y: origin.y + cocoaFrame.maxY - m.y)
         let lx = Float(m.x - cocoaFrame.minX), ly = Float(cocoaFrame.maxY - m.y)
         if lx >= 0 && lx <= W && ly >= 0 && ly <= H {
             let p = SIMD2(lx, ly)
@@ -1469,6 +1544,9 @@ final class Snowfield {
               winSnow: piles.mapValues { $0.pile.total }, clumps: flakes.filter { $0.kind == 2 }.count,
               plowing: plow != nil)
     }
+    /// Décale l'écran simulé (pour tester deux écrans côte à côte avec un seul).
+    func debugShift(x: CGFloat) { origin.x += x; cocoaFrame.origin.x += x }
+    var debugBallPos: [SIMD2<Float>] { snowballs.map { SIMD2($0.x, $0.y) } }
     var plowVisibleDebug: Bool { plow.map { !$0.waiting } ?? false }
     func debugFill(_ h: Float) {
         for wp in order where !wp.noSnow { for i in wp.pile.h.indices { wp.pile.h[i] = min(h, wp.pile.maxH) } }

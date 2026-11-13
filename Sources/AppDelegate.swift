@@ -104,6 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             o.invalidate()
             overlays[id] = nil
         }
+        for o in overlays.values {
+            o.field.neighbors = overlays.values.filter { $0 !== o }.map { $0.field.globalFrame }
+        }
         updateDock()
     }
 
@@ -135,6 +138,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return overlays[CGDirectDisplayID(num.uint32Value)]
         }
         return overlays.values.first
+    }
+
+    /// Une boule lancée ou portée d'un écran à l'autre continue sa course sur l'écran d'arrivée.
+    func handOff(_ balls: [(ball: Snowball, grabbed: Bool)], from source: Overlay) {
+        for (b, grabbed) in balls {
+            let p = CGPoint(x: CGFloat(b.x), y: CGFloat(b.y))
+            // Une boule portée suit le curseur, même si elle est encore un peu en retard sur lui.
+            let found = overlays.values.first { $0 !== source && $0.field.globalFrame.contains(p) }
+                ?? (grabbed ? overlayUnderMouse().flatMap { $0 !== source ? $0 : nil } : nil)
+            guard let target = found, !target.hiddenForFullscreen else { continue }
+            target.field.receive(b, grabbed: grabbed)
+        }
     }
 
     @objc private func screensChanged() { rebuildOverlays(); applyState() }

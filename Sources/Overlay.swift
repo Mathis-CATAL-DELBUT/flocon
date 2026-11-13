@@ -156,6 +156,8 @@ final class Overlay: NSObject {
             && flags.intersection([.maskCommand, .maskControl, .maskShift]).isEmpty
         field.step(dt: dt, mouse: NSEvent.mouseLocation, option: option,
                    settings: app.settings, energyFactor: app.energyFactor)
+        let leaving = field.takeOutgoing()
+        if !leaving.isEmpty { app.handOff(leaving, from: self) }
         renderer.draw(field, scale: Float(view.renderScale))
     }
 
